@@ -1,0 +1,6 @@
+{
+    "cmake.sourceDirectory": "/home/xushijian/xsj/gaussian-splatting/SIBR_viewers",
+    "files.associations": {
+        "wait.h": "c"
+    }
+}
