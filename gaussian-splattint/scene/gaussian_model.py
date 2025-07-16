@@ -54,7 +54,7 @@ class GaussianModel:
         self._xyz = torch.empty(0)
 
         self._features_dc = torch.empty(0) ## 直接颜色特征
-        self._features_rest = torch.empty(0) ## 其他SH系数特征
+        self._features_rest = torch.empty(0) ## 其他SH系数特征 当SH=0时，那么这个参数就没有用了
 
         self._scaling = torch.empty(0) ## 缩放参数
         self._rotation = torch.empty(0) ## 旋转参数
