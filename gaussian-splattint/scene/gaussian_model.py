@@ -61,7 +61,7 @@ class GaussianModel:
         self._opacity = torch.empty(0) ## 透明度参数
         self.max_radii2D = torch.empty(0) ## 最大半径2D
         self.xyz_gradient_accum = torch.empty(0) ## xyz梯度累积
-        self.denom = torch.empty(0) 
+        self.denom = torch.empty(0) #累加器
         self.optimizer = None
         self.percent_dense = 0 ## 密集化百分比
         self.spatial_lr_scale = 0 ## 空间学习率缩放
@@ -181,7 +181,7 @@ class GaussianModel:
         self.percent_dense = training_args.percent_dense
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
-
+        ## 加载优化器，梯度和平均梯度都为0
         l = [
             {'params': [self._xyz], 'lr': training_args.position_lr_init * self.spatial_lr_scale, "name": "xyz"},
             {'params': [self._features_dc], 'lr': training_args.feature_lr, "name": "f_dc"},
@@ -189,7 +189,7 @@ class GaussianModel:
             {'params': [self._opacity], 'lr': training_args.opacity_lr, "name": "opacity"},
             {'params': [self._scaling], 'lr': training_args.scaling_lr, "name": "scaling"},
             {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"}
-        ]
+        ]## 优化器参数列表
 
         if self.optimizer_type == "default":
             self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
@@ -200,11 +200,11 @@ class GaussianModel:
                 # A special version of the rasterizer is required to enable sparse adam
                 self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
 
-        self.exposure_optimizer = torch.optim.Adam([self._exposure])
-
+        self.exposure_optimizer = torch.optim.Adam([self._exposure])## 默认参数
+## 学习率调度器 
         self.xyz_scheduler_args = get_expon_lr_func(lr_init=training_args.position_lr_init*self.spatial_lr_scale,
                                                     lr_final=training_args.position_lr_final*self.spatial_lr_scale,
-                                                    lr_delay_mult=training_args.position_lr_delay_mult,
+                                                    lr_delay_mult=training_args.position_lr_delay_mult,## 预热步数
                                                     max_steps=training_args.position_lr_max_steps)
         
         self.exposure_scheduler_args = get_expon_lr_func(training_args.exposure_lr_init, training_args.exposure_lr_final,
@@ -225,36 +225,41 @@ class GaussianModel:
                 return lr
 
     def construct_list_of_attributes(self):
-        l = ['x', 'y', 'z', 'nx', 'ny', 'nz']
+        l = ['x', 'y', 'z', 'nx', 'ny', 'nz']##添加基础位置坐标（x,y,z）和法线坐标(nx,ny,nz)[发现坐标为了占位符为了适配其他ply]
         # All channels except the 3 DC
         for i in range(self._features_dc.shape[1]*self._features_dc.shape[2]):
-            l.append('f_dc_{}'.format(i))
+            l.append('f_dc_{}'.format(i))## 1*3,其实是RBG颜色
         for i in range(self._features_rest.shape[1]*self._features_rest.shape[2]):
-            l.append('f_rest_{}'.format(i))
+            l.append('f_rest_{}'.format(i))## k*3其中 K 是高阶系数的数量。循环会添加 f_rest_0, f_rest_1, ..., 直到 f_rest_{K*3-1}。
         l.append('opacity')
         for i in range(self._scaling.shape[1]):
-            l.append('scale_{}'.format(i))
+            l.append('scale_{}'.format(i))#循环会添加 scale_0, scale_1, scale_2。
         for i in range(self._rotation.shape[1]):
-            l.append('rot_{}'.format(i))
+            l.append('rot_{}'.format(i))##循环会添加 rot_0, rot_1, rot_2, rot_3。
         return l
 
     def save_ply(self, path):
         mkdir_p(os.path.dirname(path))
 
-        xyz = self._xyz.detach().cpu().numpy()
-        normals = np.zeros_like(xyz)
-        f_dc = self._features_dc.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
+        xyz = self._xyz.detach().cpu().numpy()##将张量从当前的计算图中分离出来，使其不再需要梯度。这是转换为NumPy的必要前提。
+        normals = np.zeros_like(xyz)## 法线占位符
+        f_dc = self._features_dc.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()## 将特征从 (P, F, C) 转换为 (P, F*C)，其中 P 是点的数量，F 是特征的数量，C 是通道数。
         f_rest = self._features_rest.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
         opacities = self._opacity.detach().cpu().numpy()
         scale = self._scaling.detach().cpu().numpy()
         rotation = self._rotation.detach().cpu().numpy()
+# 定义文件结构
+        dtype_full = [(attribute, 'f4') for attribute in self.construct_list_of_attributes()]## 'f4' 代表4字节的浮点数（即 float32）
+        #这个 dtype_full 列表精确地定义了 .ply 文件中每个顶点（在这里代表一个高斯球）的数据结构（Schema）。
 
-        dtype_full = [(attribute, 'f4') for attribute in self.construct_list_of_attributes()]
-
-        elements = np.empty(xyz.shape[0], dtype=dtype_full)
-        attributes = np.concatenate((xyz, normals, f_dc, f_rest, opacities, scale, rotation), axis=1)
+        elements = np.empty(xyz.shape[0], dtype=dtype_full)## 创建一个空的NumPy结构化数组
+        attributes = np.concatenate((xyz, normals, f_dc, f_rest, opacities, scale, rotation), axis=1) ## 将所有属性连接在一起形成一个大的数组
         elements[:] = list(map(tuple, attributes))
+        ## map 函数将每个元素转换为元组，以便与 dtype_full 的结构匹配。
+        ## list() 函数会消耗上面 map 生成的迭代器，并将其转换成一个Python列表。
+        ## [:]保留原本设置的格式
         el = PlyElement.describe(elements, 'vertex')
+        ## PlyElement.describe(...): 将填充好的 elements 数据描述为一个PLY元素，并命名为 "vertex"（顶点）。
         PlyData([el]).write(path)
 
     def reset_opacity(self):
