@@ -263,7 +263,9 @@ class GaussianModel:
         PlyData([el]).write(path)
 
     def reset_opacity(self):
+        ## 创造原本不透明和0.01之间最小值作为新的不透明度
         opacities_new = self.inverse_opacity_activation(torch.min(self.get_opacity, torch.ones_like(self.get_opacity)*0.01))
+        ## 2. 在优化器中替换旧的opacity张量，并重置其状态
         optimizable_tensors = self.replace_tensor_to_optimizer(opacities_new, "opacity")
         self._opacity = optimizable_tensors["opacity"]
 
@@ -289,10 +291,13 @@ class GaussianModel:
         features_dc[:, 0, 0] = np.asarray(plydata.elements[0]["f_dc_0"])
         features_dc[:, 1, 0] = np.asarray(plydata.elements[0]["f_dc_1"])
         features_dc[:, 2, 0] = np.asarray(plydata.elements[0]["f_dc_2"])
-
+        # 筛选出所有的额外SH系数
         extra_f_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("f_rest_")]
+        # 按照后缀排序
         extra_f_names = sorted(extra_f_names, key = lambda x: int(x.split('_')[-1]))
+        # 看一下是否满足
         assert len(extra_f_names)==3*(self.max_sh_degree + 1) ** 2 - 3
+        # 初始化为零的数组(n,a)
         features_extra = np.zeros((xyz.shape[0], len(extra_f_names)))
         for idx, attr_name in enumerate(extra_f_names):
             features_extra[:, idx] = np.asarray(plydata.elements[0][attr_name])
@@ -324,13 +329,15 @@ class GaussianModel:
         optimizable_tensors = {}
         for group in self.optimizer.param_groups:
             if group["name"] == name:
+                ## 获得旧的优化器状态
                 stored_state = self.optimizer.state.get(group['params'][0], None)
+                ## 重置优化器的动量和二阶矩
                 stored_state["exp_avg"] = torch.zeros_like(tensor)
                 stored_state["exp_avg_sq"] = torch.zeros_like(tensor)
-
+                ## 将新的张量替换旧的张量，并设置为可训练
                 del self.optimizer.state[group['params'][0]]
                 group["params"][0] = nn.Parameter(tensor.requires_grad_(True))
-                self.optimizer.state[group['params'][0]] = stored_state
+                self.optimizer.state[group["params"][0]] = stored_state
 
                 optimizable_tensors[group["name"]] = group["params"][0]
         return optimizable_tensors
