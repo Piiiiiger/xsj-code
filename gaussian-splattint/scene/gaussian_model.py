@@ -106,11 +106,11 @@ class GaussianModel:
 
     @property
     def get_scaling(self):
-        return self.scaling_activation(self._scaling)
-    
+        return self.scaling_activation(self._scaling.repeat(1, 3))
+
     @property
     def get_rotation(self):
-        return self.rotation_activation(torch.eye(3))
+        return self.rotation_activation(self._rotation)
 
     @property
     def get_xyz(self):
@@ -378,6 +378,7 @@ class GaussianModel:
         self._opacity = optimizable_tensors["opacity"]
         self._scaling = optimizable_tensors["scaling"]
         #self._rotation = optimizable_tensors["rotation"]
+        self._rotation = nn.Parameter(self._rotation.data[valid_points_mask])
 
         self.xyz_gradient_accum = self.xyz_gradient_accum[valid_points_mask]
 
@@ -409,13 +410,13 @@ class GaussianModel:
 
         return optimizable_tensors
 # 重置致密化策略状态
-    def densification_postfix(self, new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_tmp_radii):
+    def densification_postfix(self, new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling,new_rotation, new_tmp_radii):
         d = {"xyz": new_xyz,
         "f_dc": new_features_dc,
         "f_rest": new_features_rest,
         "opacity": new_opacities,
-        "scaling" : new_scaling,}
-        #"rotation" : new_rotation}
+        "scaling" : new_scaling,
+        "rotation" : new_rotation}
 
         optimizable_tensors = self.cat_tensors_to_optimizer(d)
         self._xyz = optimizable_tensors["xyz"]
@@ -424,6 +425,7 @@ class GaussianModel:
         self._opacity = optimizable_tensors["opacity"]
         self._scaling = optimizable_tensors["scaling"]
         #self._rotation = optimizable_tensors["rotation"]
+        self._rotation = nn.Parameter(torch.cat((self._rotation.data, new_rotation), dim=0))
 
         self.tmp_radii = torch.cat((self.tmp_radii, new_tmp_radii))
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
@@ -459,7 +461,7 @@ class GaussianModel:
         #new_xyz = torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + self.get_xyz[selected_pts_mask].repeat(N, 1)
         new_xyz = samples + self.get_xyz[selected_pts_mask].repeat(N, 1)
         ## 放缩变小0.8*N
-        new_scaling = self.scaling_inverse_activation(self.get_scaling[selected_pts_mask].repeat(N,1) / (0.8*N))
+        new_scaling = self._scaling[selected_pts_mask].repeat(N,1) - np.log(0.8*N)
         new_rotation = self._rotation[selected_pts_mask].repeat(N,1)
         ## 以下就是复制
         new_features_dc = self._features_dc[selected_pts_mask].repeat(N,1,1)
