@@ -60,7 +60,7 @@ class GaussianModel:
         self._features_rest = torch.empty(0) ## 其他SH系数特征 当SH=0时，那么这个参数就没有用了
 
         self._scaling = torch.empty(0) ## 缩放参数
-        #self._rotation = torch.empty(0) ## 旋转参数
+        self._rotation = torch.empty(0) ## 旋转参数
         self._opacity = torch.empty(0) ## 透明度参数
         self.max_radii2D = torch.empty(0) ## 最大半径2D
         self.xyz_gradient_accum = torch.empty(0) ## xyz梯度累积
@@ -77,7 +77,7 @@ class GaussianModel:
             self._features_dc,
             self._features_rest,
             self._scaling,
-            #self._rotation,
+            self._rotation,
             self._opacity,
             self.max_radii2D,
             self.xyz_gradient_accum,
@@ -92,7 +92,7 @@ class GaussianModel:
         self._features_dc, 
         self._features_rest,
         self._scaling, 
-        #self._rotation, 
+        self._rotation, 
         self._opacity,
         self.max_radii2D, 
         xyz_gradient_accum, 
@@ -163,8 +163,8 @@ class GaussianModel:
 
         dist2 = torch.clamp_min(distCUDA2(torch.from_numpy(np.asarray(pcd.points)).float().cuda()), 0.0000001)## 计算点云之间的距离并且防止距离过小或重叠，如果距离过小，那么就设置距离为指定值
         scales = torch.log(torch.sqrt(dist2))[...,None] ## 计算缩放参数，使用对数缩放距离,使用log 的原因是因为激活函数是exp，所以这里需要对距离进行对数缩放
-        #rots = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
-        #rots[:, 0] = 1
+        rots = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
+        rots[:, 0] = 1
 
         opacities = self.inverse_opacity_activation(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))## 透明度参数初始化为0.1，同时反激活函数设置
         
@@ -172,7 +172,7 @@ class GaussianModel:
         self._features_dc = nn.Parameter(features[:,:,0:1].transpose(1, 2).contiguous().requires_grad_(True))
         self._features_rest = nn.Parameter(features[:,:,1:].transpose(1, 2).contiguous().requires_grad_(True))
         self._scaling = nn.Parameter(scales.requires_grad_(True))
-        #self._rotation = nn.Parameter(rots.requires_grad_(True))
+        self._rotation = nn.Parameter(rots.requires_grad_(False))
         self._opacity = nn.Parameter(opacities.requires_grad_(True))
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
         self.exposure_mapping = {cam_info.image_name: idx for idx, cam_info in enumerate(cam_infos)}
@@ -460,14 +460,14 @@ class GaussianModel:
         new_xyz = samples + self.get_xyz[selected_pts_mask].repeat(N, 1)
         ## 放缩变小0.8*N
         new_scaling = self.scaling_inverse_activation(self.get_scaling[selected_pts_mask].repeat(N,1) / (0.8*N))
-        #new_rotation = self._rotation[selected_pts_mask].repeat(N,1)
+        new_rotation = self._rotation[selected_pts_mask].repeat(N,1)
         ## 以下就是复制
         new_features_dc = self._features_dc[selected_pts_mask].repeat(N,1,1)
         new_features_rest = self._features_rest[selected_pts_mask].repeat(N,1,1)
         new_opacity = self._opacity[selected_pts_mask].repeat(N,1)
         new_tmp_radii = self.tmp_radii[selected_pts_mask].repeat(N)
 
-        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_tmp_radii)
+        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation,new_tmp_radii)
         # 原本的+现在的
         prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
 
@@ -485,11 +485,11 @@ class GaussianModel:
         new_features_rest = self._features_rest[selected_pts_mask]
         new_opacities = self._opacity[selected_pts_mask]
         new_scaling = self._scaling[selected_pts_mask]
-        #new_rotation = self._rotation[selected_pts_mask]
+        new_rotation = self._rotation[selected_pts_mask]
 
         new_tmp_radii = self.tmp_radii[selected_pts_mask]
-    
-        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_tmp_radii)
+
+        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_tmp_radii)
 
     def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, radii):
         grads = self.xyz_gradient_accum / self.denom
