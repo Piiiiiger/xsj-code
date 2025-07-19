@@ -38,7 +38,7 @@ class GaussianModel:
             cov[:, 5] = scaling ** 2  .squeeze()
             
             return cov
-        self.scaling_inverse_activation = torch.log ##逆函数
+        self.scaling_activation = torch.exp
         self.scaling_inverse_activation = torch.log ##逆函数
 
         self.covariance_activation = build_scaling_matrix_from_scaling
@@ -162,7 +162,7 @@ class GaussianModel:
         print("Number of points at initialisation : ", fused_point_cloud.shape[0])
 
         dist2 = torch.clamp_min(distCUDA2(torch.from_numpy(np.asarray(pcd.points)).float().cuda()), 0.0000001)## 计算点云之间的距离并且防止距离过小或重叠，如果距离过小，那么就设置距离为指定值
-        scales = torch.log(torch.sqrt(dist2))[...,None].repeat ## 计算缩放参数，使用对数缩放距离,使用log 的原因是因为激活函数是exp，所以这里需要对距离进行对数缩放
+        scales = torch.log(torch.sqrt(dist2))[...,None] ## 计算缩放参数，使用对数缩放距离,使用log 的原因是因为激活函数是exp，所以这里需要对距离进行对数缩放
         #rots = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
         #rots[:, 0] = 1
 
