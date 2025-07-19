@@ -30,21 +30,24 @@ except:
 class GaussianModel:
 
     def setup_functions(self):
-        def build_covariance_from_scaling_rotation(scaling, scaling_modifier, rotation):
-            L = build_scaling_rotation(scaling_modifier * scaling, rotation)
-            actual_covariance = L @ L.transpose(1, 2)
-            symm = strip_symmetric(actual_covariance)
-            return symm
-        
-        self.scaling_activation = torch.exp
+        def build_scaling_matrix_from_scaling(scaling,scaling_modifier):
+            scaling =scaling * scaling_modifier
+            cov = torch.zeros((scaling.shape[0], 6), device="cuda")
+            cov[:, 0] = scaling ** 2  .squeeze()
+            cov[:, 3] = scaling ** 2  .squeeze()
+            cov[:, 5] = scaling ** 2  .squeeze()
+            
+            return cov
+        self.scaling_inverse_activation = torch.log ##逆函数
         self.scaling_inverse_activation = torch.log ##逆函数
 
-        self.covariance_activation = build_covariance_from_scaling_rotation
+        self.covariance_activation = build_scaling_matrix_from_scaling
 
         self.opacity_activation = torch.sigmoid## 1/1+e-x
         self.inverse_opacity_activation = inverse_sigmoid
 
         self.rotation_activation = torch.nn.functional.normalize##标准化
+
 
 
     def __init__(self, sh_degree, optimizer_type="default"):
@@ -57,7 +60,7 @@ class GaussianModel:
         self._features_rest = torch.empty(0) ## 其他SH系数特征 当SH=0时，那么这个参数就没有用了
 
         self._scaling = torch.empty(0) ## 缩放参数
-        self._rotation = torch.empty(0) ## 旋转参数
+        #self._rotation = torch.empty(0) ## 旋转参数
         self._opacity = torch.empty(0) ## 透明度参数
         self.max_radii2D = torch.empty(0) ## 最大半径2D
         self.xyz_gradient_accum = torch.empty(0) ## xyz梯度累积
@@ -74,7 +77,7 @@ class GaussianModel:
             self._features_dc,
             self._features_rest,
             self._scaling,
-            self._rotation,
+            #self._rotation,
             self._opacity,
             self.max_radii2D,
             self.xyz_gradient_accum,
@@ -89,7 +92,7 @@ class GaussianModel:
         self._features_dc, 
         self._features_rest,
         self._scaling, 
-        self._rotation, 
+        #self._rotation, 
         self._opacity,
         self.max_radii2D, 
         xyz_gradient_accum, 
@@ -107,8 +110,8 @@ class GaussianModel:
     
     @property
     def get_rotation(self):
-        return self.rotation_activation(self._rotation)
-    
+        return self.rotation_activation(torch.eye(3))
+
     @property
     def get_xyz(self):
         return self._xyz
@@ -142,7 +145,7 @@ class GaussianModel:
             return self.pretrained_exposures[image_name]
     
     def get_covariance(self, scaling_modifier = 1):
-        return self.covariance_activation(self.get_scaling, scaling_modifier, self._rotation)
+        return self.covariance_activation(self.get_scaling, scaling_modifier)
 
     def oneupSHdegree(self):
         if self.active_sh_degree < self.max_sh_degree:
@@ -159,9 +162,9 @@ class GaussianModel:
         print("Number of points at initialisation : ", fused_point_cloud.shape[0])
 
         dist2 = torch.clamp_min(distCUDA2(torch.from_numpy(np.asarray(pcd.points)).float().cuda()), 0.0000001)## 计算点云之间的距离并且防止距离过小或重叠，如果距离过小，那么就设置距离为指定值
-        scales = torch.log(torch.sqrt(dist2))[...,None].repeat(1, 3) ## 计算缩放参数，使用对数缩放距离,使用log 的原因是因为激活函数是exp，所以这里需要对距离进行对数缩放
-        rots = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
-        rots[:, 0] = 1
+        scales = torch.log(torch.sqrt(dist2))[...,None].repeat ## 计算缩放参数，使用对数缩放距离,使用log 的原因是因为激活函数是exp，所以这里需要对距离进行对数缩放
+        #rots = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
+        #rots[:, 0] = 1
 
         opacities = self.inverse_opacity_activation(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))## 透明度参数初始化为0.1，同时反激活函数设置
         
@@ -169,7 +172,7 @@ class GaussianModel:
         self._features_dc = nn.Parameter(features[:,:,0:1].transpose(1, 2).contiguous().requires_grad_(True))
         self._features_rest = nn.Parameter(features[:,:,1:].transpose(1, 2).contiguous().requires_grad_(True))
         self._scaling = nn.Parameter(scales.requires_grad_(True))
-        self._rotation = nn.Parameter(rots.requires_grad_(True))
+        #self._rotation = nn.Parameter(rots.requires_grad_(True))
         self._opacity = nn.Parameter(opacities.requires_grad_(True))
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
         self.exposure_mapping = {cam_info.image_name: idx for idx, cam_info in enumerate(cam_infos)}
@@ -187,8 +190,8 @@ class GaussianModel:
             {'params': [self._features_dc], 'lr': training_args.feature_lr, "name": "f_dc"},
             {'params': [self._features_rest], 'lr': training_args.feature_lr / 20.0, "name": "f_rest"},
             {'params': [self._opacity], 'lr': training_args.opacity_lr, "name": "opacity"},
-            {'params': [self._scaling], 'lr': training_args.scaling_lr, "name": "scaling"},
-            {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"}
+            {'params': [self._scaling], 'lr': training_args.scaling_lr, "name": "scaling"}
+           # {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"}
         ]## 优化器参数列表
 
         if self.optimizer_type == "default":
@@ -232,9 +235,10 @@ class GaussianModel:
         for i in range(self._features_rest.shape[1]*self._features_rest.shape[2]):
             l.append('f_rest_{}'.format(i))## k*3其中 K 是高阶系数的数量。循环会添加 f_rest_0, f_rest_1, ..., 直到 f_rest_{K*3-1}。
         l.append('opacity')
-        for i in range(self._scaling.shape[1]):
+        scaling= self._scaling.repeat(1,3)
+        for i in range(scaling.shape[1]):
             l.append('scale_{}'.format(i))#循环会添加 scale_0, scale_1, scale_2。
-        for i in range(self._rotation.shape[1]):
+        for i in range(4):
             l.append('rot_{}'.format(i))##循环会添加 rot_0, rot_1, rot_2, rot_3。
         return l
 
@@ -246,8 +250,10 @@ class GaussianModel:
         f_dc = self._features_dc.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()## 将特征从 (P, F, C) 转换为 (P, F*C)，其中 P 是点的数量，F 是特征的数量，C 是通道数。
         f_rest = self._features_rest.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
         opacities = self._opacity.detach().cpu().numpy()
-        scale = self._scaling.detach().cpu().numpy()
-        rotation = self._rotation.detach().cpu().numpy()
+        scale = self._scaling.repeat(1,3).detach().cpu().numpy()
+        # 先保存rotation
+        rotation = np.zeros((xyz.shape[0], 4))
+        rotation[:, 0] = 1
 # 定义文件结构
         dtype_full = [(attribute, 'f4') for attribute in self.construct_list_of_attributes()]## 'f4' 代表4字节的浮点数（即 float32）
         #这个 dtype_full 列表精确地定义了 .ply 文件中每个顶点（在这里代表一个高斯球）的数据结构（Schema）。
@@ -321,7 +327,7 @@ class GaussianModel:
         self._features_rest = nn.Parameter(torch.tensor(features_extra, dtype=torch.float, device="cuda").transpose(1, 2).contiguous().requires_grad_(True))
         self._opacity = nn.Parameter(torch.tensor(opacities, dtype=torch.float, device="cuda").requires_grad_(True))
         self._scaling = nn.Parameter(torch.tensor(scales, dtype=torch.float, device="cuda").requires_grad_(True))
-        self._rotation = nn.Parameter(torch.tensor(rots, dtype=torch.float, device="cuda").requires_grad_(True))
+        #self._rotation = nn.Parameter(torch.tensor(rots, dtype=torch.float, device="cuda").requires_grad_(True))
 
         self.active_sh_degree = self.max_sh_degree
 
@@ -371,7 +377,7 @@ class GaussianModel:
         self._features_rest = optimizable_tensors["f_rest"]
         self._opacity = optimizable_tensors["opacity"]
         self._scaling = optimizable_tensors["scaling"]
-        self._rotation = optimizable_tensors["rotation"]
+        #self._rotation = optimizable_tensors["rotation"]
 
         self.xyz_gradient_accum = self.xyz_gradient_accum[valid_points_mask]
 
@@ -403,13 +409,13 @@ class GaussianModel:
 
         return optimizable_tensors
 # 重置致密化策略状态
-    def densification_postfix(self, new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_tmp_radii):
+    def densification_postfix(self, new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_tmp_radii):
         d = {"xyz": new_xyz,
         "f_dc": new_features_dc,
         "f_rest": new_features_rest,
         "opacity": new_opacities,
-        "scaling" : new_scaling,
-        "rotation" : new_rotation}
+        "scaling" : new_scaling,}
+        #"rotation" : new_rotation}
 
         optimizable_tensors = self.cat_tensors_to_optimizer(d)
         self._xyz = optimizable_tensors["xyz"]
@@ -417,7 +423,7 @@ class GaussianModel:
         self._features_rest = optimizable_tensors["f_rest"]
         self._opacity = optimizable_tensors["opacity"]
         self._scaling = optimizable_tensors["scaling"]
-        self._rotation = optimizable_tensors["rotation"]
+        #self._rotation = optimizable_tensors["rotation"]
 
         self.tmp_radii = torch.cat((self.tmp_radii, new_tmp_radii))
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
@@ -448,19 +454,20 @@ class GaussianModel:
         # 计算旋转矩阵               
         # build_rotation 函数将旋转向量转换为旋转矩阵
         # .repeat(N, 1, 1) 0维度复制n次，1维度复制1次，2维度复制1次
-        rots = build_rotation(self._rotation[selected_pts_mask]).repeat(N,1,1)
+        # rots = build_rotation(self._rotation[selected_pts_mask]).repeat(N,1,1)
 
-        new_xyz = torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + self.get_xyz[selected_pts_mask].repeat(N, 1)
+        #new_xyz = torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + self.get_xyz[selected_pts_mask].repeat(N, 1)
+        new_xyz = samples + self.get_xyz[selected_pts_mask].repeat(N, 1)
         ## 放缩变小0.8*N
         new_scaling = self.scaling_inverse_activation(self.get_scaling[selected_pts_mask].repeat(N,1) / (0.8*N))
-        new_rotation = self._rotation[selected_pts_mask].repeat(N,1)
+        #new_rotation = self._rotation[selected_pts_mask].repeat(N,1)
         ## 以下就是复制
         new_features_dc = self._features_dc[selected_pts_mask].repeat(N,1,1)
         new_features_rest = self._features_rest[selected_pts_mask].repeat(N,1,1)
         new_opacity = self._opacity[selected_pts_mask].repeat(N,1)
         new_tmp_radii = self.tmp_radii[selected_pts_mask].repeat(N)
 
-        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation, new_tmp_radii)
+        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_tmp_radii)
         # 原本的+现在的
         prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
 
@@ -478,11 +485,11 @@ class GaussianModel:
         new_features_rest = self._features_rest[selected_pts_mask]
         new_opacities = self._opacity[selected_pts_mask]
         new_scaling = self._scaling[selected_pts_mask]
-        new_rotation = self._rotation[selected_pts_mask]
+        #new_rotation = self._rotation[selected_pts_mask]
 
         new_tmp_radii = self.tmp_radii[selected_pts_mask]
     
-        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_tmp_radii)
+        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_tmp_radii)
 
     def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, radii):
         grads = self.xyz_gradient_accum / self.denom
