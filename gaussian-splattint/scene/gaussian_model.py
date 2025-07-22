@@ -50,10 +50,11 @@ class GaussianModel:
 
 
 
-    def __init__(self, sh_degree, optimizer_type="default"):
+    def __init__(self, max_gaussians, optimizer_type="default"):
         self.active_sh_degree = 0  ## 当前使用的SH级别
         self.optimizer_type = optimizer_type ## 优化器类型
-        self.max_sh_degree = sh_degree  
+        self.max_sh_degree = 0
+        self.max_gaussians = max_gaussians
         self._xyz = torch.empty(0)
 
         self._features_dc = torch.empty(0) ## 直接颜色特征
@@ -148,16 +149,51 @@ class GaussianModel:
         return self.covariance_activation(self.get_scaling, scaling_modifier)
 
     def oneupSHdegree(self):
-        if self.active_sh_degree < self.max_sh_degree:
+        if self.active_sh_degree < 0:
             self.active_sh_degree += 1
 
     def create_from_pcd(self, pcd : BasicPointCloud, cam_infos : int, spatial_lr_scale : float):
         self.spatial_lr_scale = spatial_lr_scale
         fused_point_cloud = torch.tensor(np.asarray(pcd.points)).float().cuda()  ##将pcd点云转换为tensor
         fused_color = RGB2SH(torch.tensor(np.asarray(pcd.colors)).float().cuda()) ##将颜色转换为SH系数
-        features = torch.zeros((fused_color.shape[0], 3, (self.max_sh_degree + 1) ** 2)).float().cuda() 
+        fused_sample = torch.tensor(np.asarray(pcd.colors)).float().cuda() # 保留原始颜色用于下采样
+        if self.max_gaussians != -1 and fused_point_cloud.shape[0] > self.max_gaussians:
+            print(f"Initial points {fused_point_cloud.shape[0]} exceed max_gaussians {self.max_gaussians}. Applying Voxel Grid Downsampling...")
+
+            # 动态计算 voxel_size
+            # 1. 估算场景包围盒的体积
+            # scene.cameras_extent 是一个不错的场景范围估计值
+            scene_extent = self.spatial_lr_scale # 这个参数通常与场景范围有关
+            scene_volume = scene_extent ** 3
+
+            # 2. 计算每个体素的目标体积
+            num_points = fused_point_cloud.shape[0]
+            # 我们希望采样后的点数约等于 max_gaussians
+            # 实际非空体素数会小于总点数，所以我们用一个比例因子来调整
+            # 这个比例可以根据经验设置，例如0.5
+            target_voxels = self.max_gaussians
+            voxel_volume = scene_volume / target_voxels
+            
+            # 3. 计算体素边长
+            voxel_size = voxel_volume ** (1/3)
+            print(f"Dynamically calculated voxel_size: {voxel_size:.4f}")
+
+            # 执行下采样
+            original_points = fused_point_cloud
+            original_colors_sh = fused_color_SH
+            
+            # 我们对原始点云进行下采样，然后用得到的索引去筛选SH系数和颜色
+            _, first_indices_np = np.unique((original_points / voxel_size).floor().int().cpu().numpy(), axis=0, return_index=True)
+            first_indices = torch.from_numpy(first_indices_np).to(original_points.device).long()
+
+            fused_point_cloud = original_points[first_indices]
+            fused_color_SH = original_colors_sh[first_indices]
+
+            print(f"Downsampled to {fused_point_cloud.shape[0]} points.")
+
+
+        features = torch.zeros((fused_color.shape[0], 3, 1)).float().cuda() 
         features[:, :3, 0 ] = fused_color
-        features[:, 3:, 1:] = 0.0
 
         print("Number of points at initialisation : ", fused_point_cloud.shape[0])
 
@@ -301,14 +337,12 @@ class GaussianModel:
         extra_f_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("f_rest_")]
         # 按照后缀排序
         extra_f_names = sorted(extra_f_names, key = lambda x: int(x.split('_')[-1]))
-        # 看一下是否满足
-        assert len(extra_f_names)==3*(self.max_sh_degree + 1) ** 2 - 3
         # 初始化为零的数组(n,a)
         features_extra = np.zeros((xyz.shape[0], len(extra_f_names)))
         for idx, attr_name in enumerate(extra_f_names):
             features_extra[:, idx] = np.asarray(plydata.elements[0][attr_name])
         # Reshape (P,F*SH_coeffs) to (P, F, SH_coeffs except DC)
-        features_extra = features_extra.reshape((features_extra.shape[0], 3, (self.max_sh_degree + 1) ** 2 - 1))
+        features_extra = features_extra.reshape((features_extra.shape[0], 3, 0))
 
         scale_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("scale_")]
         scale_names = sorted(scale_names, key = lambda x: int(x.split('_')[-1]))
